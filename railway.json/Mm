@@ -1,0 +1,1 @@
+{"build":{"cmd":["pip install numpy pandas aiohttp"]},"start":["python main.py"]}

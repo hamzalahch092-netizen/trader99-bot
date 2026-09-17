@@ -1,0 +1,73 @@
+import asyncio,os,json
+import numpy as np,pandas as pd
+from datetime import datetime,timezone
+import aiohttp
+
+TOKEN=os.getenv("TG_TOKEN","")
+EMAIL=os.getenv("PO_EMAIL","")
+PWD=os.getenv("PO_PASS","")
+ASSET=os.getenv("PO_ASSET","eurusd")
+TF_M=int(os.getenv("PO_TF",5))
+STAKE=float(os.getenv("PO_STAKE",0.20))
+CONF_T=float(os.getenv("PO_CONF",0.76))
+MAX_T=int(os.getenv("PO_MAXT",35))
+MAX_DD=float(os.getenv("PO_MDX",0.25))
+SU,SL=8,18
+VOL_MIN=float(os.getenv("PO_VOL",12.0))
+INIT_B=float(os.getenv("PO_BANK",50))
+
+def rsi(c,p=14):
+    d=np.diff(c);g=np.where(d>0,d,0);l=np.where(d<0,-d,0)
+    ag=float(pd.Series(g).rolling(p).mean().iloc[-1])
+    al=float(pd.Series(l).rolling(p).mean().iloc[-1])
+    return 100.0 if not al else 100-100/(1+ag/al)
+def mcd(c):
+    s=pd.Series(c)
+    return float(s.ewm(span=12).mean().iloc[-1]-s.ewm(span=26).mean().iloc[-1])
+def bp(c,p=20,k=2):
+    s=pd.Series(c);m=float(s.rolling(p).mean().iloc[-1])
+    sd=float(s.rolling(p).std().iloc[-1])
+    return max(0,min(1,(float(c[-1])-(m-k*sd))/(2*k*sd))) if sd else .5
+def atr_pct(c,h,l,p=14):
+    tr=np.maximum(h[1:]-l[1:],np.maximum(np.abs(h[1:]-c[:-1]),np.abs(l[1:]-c[:-1])))
+    a=float(pd.Series(tr).rolling(p).mean().iloc[-1])
+    return a/np.mean(c[-50:])*1e4 if len(c)>50 else 0
+
+class R:
+    def __init__(s,b):s.init=b;s.b=b;s.n=0
+    def ok(s):return s.n<MAX_T and s.b>s.init*(1-MAX_DD)
+    def tk(s,w):
+        if not s.ok():return None
+        st=s.b*STAKE;s.n+=1
+        if w:s.b+=st*.8;return st*.8
+        s.b-=st;return -st
+
+async def tg(t,cid):
+    async with aiohttp.ClientSession() as c:
+        await c.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+            json={"chat_id":cid,"text":t,"parse_mode":"HTML"})
+
+async def discover():
+    async with aiohttp.ClientSession() as c:
+        while True:
+            r=await c.get(f"https://api.telegram.org/bot{TOKEN}/getUpdates")
+            j=(await r.json()).get("result",[])
+            if j:return j[-1]["message"]["chat"]["id"]
+            await asyncio.sleep(3)
+
+def sig(c,h,l,tu):
+    v=atr_pct(c,h,l)
+    b=int(mcd(c)>0)+int(rsi(c)>55)+int(bp(c)>.6)
+    cf=b/3*(.7 if not tu else .9)
+    if b>=2 and tu and cf>=CONF_T and v>VOL_MIN:return"CALL",round(cf,2),v
+    s=int(mcd(c)<0)+int(rsi(c)<45)+int(bp(c)<.4)
+    cs=s/3*(.7 if tu else .9)
+    if s>=2 and not tu and cs>=CONF_T and v>VOL_MIN:return"PUT",round(cs,2),v
+    return None,None,v
+
+async def main():
+    cid=await discover()
+    r=R(INIT_B)
+    await tg(f"Trader99 ONLINE | bank ${r.b:.2f} | {ASSET.upper()} {TF_M}m | conf>{CONF_T} | dd<{MAX_DD*100:.0f}%",cid)
+
+asyncio.run(main())
